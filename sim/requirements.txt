@@ -1,0 +1,16 @@
+# sim env: Python 3.10, CPU only. Tested combination.
+robosuite==1.4.0
+mujoco==3.1.6
+bddl==1.0.1
+numpy<2
+gym==0.25.2
+easydict
+h5py
+pyyaml
+pillow
+opencv-python
+matplotlib
+future
+termcolor
+huggingface_hub
+torch          # LIBERO's benchmark module imports it; CPU build is fine
