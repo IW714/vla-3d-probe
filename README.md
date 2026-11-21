@@ -91,6 +91,28 @@ and features, so a residual R2 only credits within-group variation. Rows with
 `layer=baseline` give what the baseline alone explains. See the module docstring
 for the full list of targets, modes and splits.
 
+## Out-of-distribution check (LIBERO-Goal)
+
+Checkpoint C was fine-tuned on the LIBERO-Spatial demos, so the same probes are
+repeated on LIBERO-Goal scenes, which neither checkpoint was fine-tuned on.
+
+```bash
+# Mac (sim env): Goal frames
+python sim/download_data.py --datasets libero_goal
+python sim/build_dataset.py --suite libero_goal --demo-dir data/libero/libero_goal --out data/libero_goal_frames.h5
+
+# GPU box (model env): activations on Goal frames, kept apart from the Spatial ones
+python models/extract_features.py --frames data/libero_goal_frames.h5 --ckpt C --out-dir data/acts_goal
+python models/extract_features.py --frames data/libero_goal_frames.h5 --ckpt B --out-dir data/acts_goal
+
+# probes trained and tested within Goal
+python probes/run_probes.py data/acts_goal/acts_C.h5 data/acts_goal/acts_B.h5 \
+    --frames data/libero_goal_frames.h5 --out results_goal
+
+# probes trained on Spatial, tested on Goal (shared objects: bowl, plate, cabinet, stove)
+python probes/transfer_probes.py --out results_transfer
+```
+
 ## Frames file (`data/*_frames.h5`)
 
 All images are in **OpenVLA's LIBERO input orientation** (raw render rotated
