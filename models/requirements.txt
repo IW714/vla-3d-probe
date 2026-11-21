@@ -1,0 +1,12 @@
+# model env: Python 3.10, GPU box.
+# Install torch first with a CUDA 12.8+ build (needed for RTX 50-series / Blackwell):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+transformers==4.40.1   # OpenVLA's remote code was written against this (warns otherwise)
+tokenizers==0.19.1
+timm==0.9.10           # OpenVLA's remote code raises an error on other timm versions
+accelerate
+sentencepiece
+protobuf
+numpy<2
+h5py
+pillow

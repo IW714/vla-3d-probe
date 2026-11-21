@@ -25,11 +25,14 @@ cd vla-3d-probe
 uv venv -p 3.10 .venv-sim && source .venv-sim/bin/activate   # or: conda create -n libero python=3.10
 uv pip install -r sim/requirements.txt                        # or: pip install -r ...
 
-git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git third_party/LIBERO
-# LIBERO's `pip install -e .` is broken on current setuptools (no top-level
-# __init__.py), so put it on the path directly instead:
-echo "$PWD/third_party/LIBERO" > "$(python -c 'import site; print(site.getsitepackages()[0])')/libero.pth"
+# LIBERO is a pinned git submodule (first time on a new machine: git submodule update --init)
+git submodule add https://github.com/Lifelong-Robot-Learning/LIBERO.git third_party/LIBERO
+# compat mode: LIBERO's top-level libero/ has no __init__.py, so setup.py declares
+# no packages, and the default (PEP 660) editable install can't find it
+uv pip install -e third_party/LIBERO --config-settings editable_mode=compat   # or plain pip
 python -c "import libero.libero; print('libero ok')"
+# first import asks "custom path for the dataset folder?": answer N
+# (our scripts always pass the data folder explicitly)
 ```
 
 ## Build the frames file
@@ -48,6 +51,28 @@ python sim/build_dataset.py --demo-dir data/libero/libero_spatial \
 
 Rendering: on macOS leave `MUJOCO_GL` unset (robosuite picks the native
 backend). On a headless Linux box use `MUJOCO_GL=egl`.
+
+## Model env + feature extraction (GPU box)
+
+```bash
+uv venv -p 3.10 .venv-model && source .venv-model/bin/activate
+uv pip install torch --index-url https://download.pytorch.org/whl/cu128   # Blackwell needs CUDA 12.8+
+uv pip install -r models/requirements.txt
+
+# no GPU needed: check preprocessing + object-to-patch mapping -> data/check_patches.png
+python models/extract_features.py --check
+
+python models/extract_features.py --ckpt C      # -> data/acts/acts_C.h5
+python models/extract_features.py --ckpt B      # -> data/acts/acts_B.h5
+```
+
+Each `acts_<ckpt>.h5` has one group per layer (`vision`, `proj`, `llm_2` ... `llm_32`
+with the default `--layer-stride 2`), each holding `obj_pool` (N x 7 x D),
+`mean_img` (N x D) and `last_tok` (N x D, LLM layers only), all float16. Expect
+roughly 8 GB per checkpoint. It also stores `patch_w` (object coverage per token)
+and `patch_depth` (mean depth per token). Preprocessing follows OpenVLA's LIBERO
+eval (JPEG round trip, Lanczos resize to 224, 90% center crop) using PIL rather
+than TensorFlow, so pixels are close but not bit-identical.
 
 ## Frames file (`data/*_frames.h5`)
 
