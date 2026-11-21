@@ -10,3 +10,4 @@ protobuf
 numpy<2
 h5py
 pillow
+matplotlib

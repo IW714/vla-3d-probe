@@ -74,6 +74,23 @@ and `patch_depth` (mean depth per token). Preprocessing follows OpenVLA's LIBERO
 eval (JPEG round trip, Lanczos resize to 224, 90% center crop) using PIL rather
 than TensorFlow, so pixels are close but not bit-identical.
 
+## Probes (GPU box, model env)
+
+```bash
+# fast sanity check on one checkpoint: shapes, NaNs, rough depth probe vs baselines
+python probes/quick_check.py data/acts/acts_C.h5
+
+# full protocol on all checkpoints -> results/probe_results.csv + results/plots/
+python probes/run_probes.py data/acts/acts_C.h5 data/acts/acts_B.h5
+```
+
+`run_probes.py` fits ridge probes for every (checkpoint, layer, feature, target,
+baseline mode, split), choosing the ridge strength on an inner held-out set.
+Baselines (task/object identity, episode phase) are removed from both targets
+and features, so a residual R2 only credits within-group variation. Rows with
+`layer=baseline` give what the baseline alone explains. See the module docstring
+for the full list of targets, modes and splits.
+
 ## Frames file (`data/*_frames.h5`)
 
 All images are in **OpenVLA's LIBERO input orientation** (raw render rotated
