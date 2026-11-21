@@ -26,7 +26,11 @@ fixed effects), so the probe is scored only on within-group variation:
 The layer="baseline" rows in the CSV give the R2 of the baseline alone on the
 raw target, to read the residual R2s against.
 
-Splits (predictions pooled over held-out folds, then one R2):
+Splits (r2 = predictions pooled over held-out folds, then one R2;
+r2_fold_mean / r2_fold_std = R2 computed per fold, to judge how much a
+difference between checkpoints could be split noise; r2_folds = the per-fold
+values. Folds are identical across checkpoints, so compare checkpoints by the
+per-fold DIFFERENCE, which is less noisy than comparing two spreads):
   episode   5 folds by episode id
   task      leave one task out (10 folds)
 
@@ -208,6 +212,7 @@ def run_feature(R, X, rows, tgts, modes, splits):
     for split in splits:
         for mode in modes:
             Yt, Yp = np.zeros(Yraw.shape), np.full(Yraw.shape, np.nan)
+            fold_id = np.full(len(Yraw), -1)
             for k, train, itr, ival, test in folds(rows, split):
                 if test.sum() == 0 or ival.sum() == 0:
                     continue
@@ -226,8 +231,9 @@ def run_feature(R, X, rows, tgts, modes, splits):
                 outer = R.fit(Xr[ix["train"]], Yd[ix["train"]])
                 Yp[test] = to_np(outer.predict(Xr[ix["test"]], R.t(best * outer.n)))
                 Yt[test] = Y[test]
+                fold_id[test] = k
                 del Xr
-            out[(split, mode)] = (Yt, Yp)
+            out[(split, mode)] = (Yt, Yp, fold_id)
     return out
 
 
@@ -247,7 +253,8 @@ def main():
     R = Ridge(dev)
     os.makedirs(args.out, exist_ok=True)
     csv_path = os.path.join(args.out, "probe_results.csv")
-    fields = ["ckpt", "layer", "feature", "target", "mode", "split", "scope", "r2", "n"]
+    fields = ["ckpt", "layer", "feature", "target", "mode", "split", "scope", "r2", "n",
+              "r2_fold_mean", "r2_fold_std", "n_folds", "r2_folds"]
     w = csv.DictWriter(open(csv_path, "w", newline=""), fieldnames=fields)
     w.writeheader()
 
@@ -289,7 +296,7 @@ def main():
                 X = R.t(X.astype(np.float32))
                 dims = np.cumsum([0] + [rows["y"][t].shape[1] for t in tgts])
                 res = run_feature(R, X, rows, tgts, args.modes, args.splits)
-                for (split, m), (Yt, Yp) in res.items():
+                for (split, m), (Yt, Yp, fid) in res.items():
                     for j, t in enumerate(tgts):
                         idx = slice(dims[j], dims[j + 1])
                         scopes = [("all", np.ones(len(Yt), bool))]
@@ -299,8 +306,14 @@ def main():
                             if msk.sum() < 20:
                                 continue
                             r = r2_cols(Yt[msk][:, idx], Yp[msk][:, idx]).mean()
+                            # spread across held-out folds: how much R2 moves with the split
+                            per = [r2_cols(Yt[msk & (fid == k)][:, idx], Yp[msk & (fid == k)][:, idx]).mean()
+                                   for k in np.unique(fid[msk]) if (msk & (fid == k)).sum() >= 20]
                             w.writerow(dict(ckpt=ckpt, layer=L, feature=feat, target=t, mode=m,
-                                            split=split, scope=sc, r2=round(float(r), 5), n=int(msk.sum())))
+                                            split=split, scope=sc, r2=round(float(r), 5), n=int(msk.sum()),
+                                            r2_fold_mean=round(float(np.mean(per)), 5) if per else "",
+                                            r2_fold_std=round(float(np.std(per)), 5) if per else "",
+                                            n_folds=len(per), r2_folds=";".join(f"{x:.5f}" for x in per)))
                 del X
             print(f"  {L:8s} done in {time.time() - t0:.0f}s", flush=True)
     print(f"\nwrote {csv_path}")
@@ -321,7 +334,10 @@ def plot(csv_path, out_dir):
         fig, ax = plt.subplots(figsize=(7, 4))
         for ckpt in sorted({r["ckpt"] for r in sel}):
             rs = [r for r in sel if r["ckpt"] == ckpt]
-            ax.plot([r["layer"] for r in rs], [float(r["r2"]) for r in rs], marker="o", label=ckpt)
+            xs, ys = [r["layer"] for r in rs], np.array([float(r["r2"]) for r in rs])
+            ax.plot(xs, ys, marker="o", label=ckpt)
+            sd = np.array([float(r["r2_fold_std"] or 0) for r in rs])
+            ax.fill_between(range(len(xs)), ys - sd, ys + sd, alpha=0.2)
         base = [r for r in rows if r["layer"] == "baseline" and (r["target"], r["mode"], r["split"]) == (t, m, s)]
         title = f"{t} | baseline removed: {m} | split: {s} | {feat}"
         if m != "none" and base:
