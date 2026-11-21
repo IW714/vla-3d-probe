@@ -172,7 +172,11 @@ class Ridge:
         ym = Y.mean(0)
         G = Xs.T @ Xs
         if torch:
-            s, V = torch.linalg.eigh(G)
+            try:
+                s, V = torch.linalg.eigh(G)
+            except RuntimeError:  # rare cuSOLVER non-convergence: redo on CPU in float64
+                s, V = torch.linalg.eigh(G.double().cpu())
+                s, V = s.float().to(G.device), V.float().to(G.device)
             s = s.clamp_min(0)
         else:
             s, V = np.linalg.eigh(G)
