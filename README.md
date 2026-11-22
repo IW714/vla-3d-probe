@@ -113,6 +113,27 @@ python probes/run_probes.py data/acts_goal/acts_C.h5 data/acts_goal/acts_B.h5 \
 python probes/transfer_probes.py --out results_transfer
 ```
 
+## Checkpoint A (base Prismatic VLM, GPU box)
+
+A is `prism-dinosiglip-224px+7b`, the VLM OpenVLA was trained from. It loads through
+`prismatic-vlms` (separate env; older pins than the OpenVLA env) and needs Hugging
+Face access to `meta-llama/Llama-2-7b-hf` plus a read token in `.hf_token`
+(gitignored) or `$HF_TOKEN`.
+
+```bash
+cd ~/Dev && git clone https://github.com/TRI-ML/prismatic-vlms.git
+cd prismatic-vlms && uv venv -p 3.10 .venv-prism && source .venv-prism/bin/activate
+uv pip install torch --index-url https://download.pytorch.org/whl/cu128
+uv pip install -e . h5py pillow
+cd ~/Dev/vla-3d-probe
+python models/extract_features.py --ckpt A                                            # Spatial
+python models/extract_features.py --ckpt A --frames data/libero_goal_frames.h5 --out-dir data/acts_goal
+```
+
+A gets the same preprocessed image and prompt text as B and C, without the trailing
+action token. Compare checkpoints on object-pooled features; A was never trained on
+the action prompt, so last-token features are not comparable.
+
 ## Frames file (`data/*_frames.h5`)
 
 All images are in **OpenVLA's LIBERO input orientation** (raw render rotated

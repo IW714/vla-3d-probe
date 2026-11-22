@@ -8,3 +8,5 @@ __pycache__/
 *.hdf5
 *.npz
 *.pt
+.hf_token
+*.log

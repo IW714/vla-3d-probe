@@ -37,7 +37,7 @@ from PIL import Image
 CKPTS = {
     "B": "openvla/openvla-7b",
     "C": "openvla/openvla-7b-finetuned-libero-spatial",
-    # "A": base Prismatic VLM, needs the prismatic-vlms loader (TODO)
+    "A": "prism-dinosiglip-224px+7b",   # base Prismatic VLM OpenVLA started from; needs prismatic-vlms + Llama-2 access
 }
 PROMPT = "In: What action should the robot take to {}?\nOut:"
 IMG = 224        # model input size
@@ -115,26 +115,78 @@ def run_check(f, args):
     print(f"wrote {out}  (columns: model input + 16x16 grid | object coverage | patch depth)")
 
 
-def run_extract(f, args):
+def load_openvla(model_id, dev, cap):
+    """B and C: OpenVLA checkpoints through Hugging Face remote code."""
     import torch
     from transformers import AutoModelForVision2Seq, AutoProcessor
 
-    model_id = CKPTS[args.ckpt]
-    dev = "cuda:0" if torch.cuda.is_available() else "cpu"
     proc = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
     vla = AutoModelForVision2Seq.from_pretrained(
         model_id, torch_dtype=torch.bfloat16, attn_implementation="sdpa",
         low_cpu_mem_usage=True, trust_remote_code=True).to(dev).eval()
-
-    # Capture the vision encoder output with a hook (projector + LLM outputs
-    # come back in hidden_states).
-    cap = {}
     vla.vision_backbone.register_forward_hook(lambda m, i, o: cap.__setitem__("vision", o))
+
+    def forward(prompt, imgs):
+        inputs = proc([prompt] * len(imgs), imgs).to(dev, dtype=torch.bfloat16)
+        ids = inputs["input_ids"]
+        if not torch.all(ids[:, -1] == 29871):   # predict_action appends this empty token
+            ids = torch.cat([ids, torch.full((len(imgs), 1), 29871, device=dev, dtype=ids.dtype)], 1)
+        with torch.no_grad():
+            o = vla(input_ids=ids, attention_mask=torch.ones_like(ids), pixel_values=inputs["pixel_values"],
+                    output_hidden_states=True, use_cache=False, return_dict=True)
+        return o.hidden_states
+
+    return forward, vla.language_model.config.num_hidden_layers
+
+
+def load_prismatic(model_id, dev, cap):
+    """A: the base Prismatic VLM (no robot training) through the prismatic-vlms
+    package. Same layout as OpenVLA: fused DINOv2+SigLIP patches projected and
+    inserted right after BOS, Llama-2 7B on top. Fed the same prompt text and the
+    same preprocessed 224px image as B and C; no trailing action token, since A
+    was never trained to emit actions."""
+    import torch
+    from prismatic import load
+
+    token = os.environ.get("HF_TOKEN")
+    if token is None and os.path.exists(".hf_token"):
+        token = open(".hf_token").read().strip()
+    vlm = load(model_id, hf_token=token)
+    vlm.to(dev, dtype=torch.bfloat16).eval()
+    vlm.vision_backbone.register_forward_hook(lambda m, i, o: cap.__setitem__("vision", o))
+    tf, tok = vlm.vision_backbone.image_transform, vlm.llm_backbone.tokenizer
+
+    def forward(prompt, imgs):
+        pv = [tf(im) for im in imgs]
+        if isinstance(pv[0], dict):              # fused backbones return {"dino": ..., "siglip": ...}
+            pv = {k: torch.stack([p[k] for p in pv]).to(dev, dtype=torch.bfloat16) for k in pv[0]}
+        else:
+            pv = torch.stack(pv).to(dev, dtype=torch.bfloat16)
+        ids = tok(prompt, truncation=True, return_tensors="pt").input_ids.repeat(len(imgs), 1).to(dev)
+        with torch.no_grad():
+            o = vlm(input_ids=ids, attention_mask=torch.ones_like(ids), pixel_values=pv,
+                    output_hidden_states=True, return_dict=True)
+        return o.hidden_states
+
+    llm = getattr(vlm.llm_backbone, "llm", None)
+    n_llm = llm.config.num_hidden_layers if llm is not None else 32
+    return forward, n_llm
+
+
+def run_extract(f, args):
+    import torch
+
+    model_id = CKPTS[args.ckpt]
+    dev = "cuda:0" if torch.cuda.is_available() else "cpu"
+    # The vision encoder output is captured with a hook; projector and LLM
+    # outputs come back in hidden_states.
+    cap = {}
+    loader = load_prismatic if args.ckpt == "A" else load_openvla
+    forward, n_llm = loader(model_id, dev, cap)
 
     names = list(f.attrs["object_names"])
     instrs = list(f.attrs["instructions"])
     K, N = len(names), len(f["rgb"])
-    n_llm = vla.language_model.config.num_hidden_layers
     llm_layers = list(range(args.layer_stride, n_llm + 1, args.layer_stride))
     if n_llm not in llm_layers:
         llm_layers.append(n_llm)
@@ -165,17 +217,12 @@ def run_extract(f, args):
                 pw[i], pdp[i] = w, d
             W = np.stack(W).astype(np.float32)
 
-            inputs = proc([prompt] * len(r), imgs).to(dev, dtype=torch.bfloat16)
-            ids = inputs["input_ids"]
-            if not torch.all(ids[:, -1] == 29871):   # predict_action appends this empty token
-                ids = torch.cat([ids, torch.full((len(r), 1), 29871, device=dev, dtype=ids.dtype)], 1)
-            mask = torch.ones_like(ids)
-            with torch.no_grad():
-                o = vla(input_ids=ids, attention_mask=mask, pixel_values=inputs["pixel_values"],
-                        output_hidden_states=True,
-                        use_cache=False, return_dict=True)
-
-            hs = o.hidden_states                     # tuple: [embeddings, layer 1, ..., layer 32]
+            hs = forward(prompt, imgs)               # tuple: [embeddings, layer 1, ..., layer 32]
+            if b0 == 0 and iid == instr_id.min():
+                assert len(hs) == n_llm + 1 and hs[0].shape[1] > GRID * GRID, \
+                    f"unexpected hidden states: {len(hs)} x {tuple(hs[0].shape)}"
+                print(f"[{args.ckpt}] seq len {hs[0].shape[1]}, {len(hs) - 1} LLM layers, "
+                      f"vision feats {tuple(cap['vision'].shape)}", flush=True)
             # hs[0] at the image positions is exactly the projector output
             feats = {"vision": cap["vision"], "proj": hs[0][:, 1:1 + GRID * GRID]}
             for l in llm_layers:
@@ -207,7 +254,7 @@ def run_extract(f, args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--frames", default="data/libero_spatial_frames.h5")
-    ap.add_argument("--ckpt", choices=sorted(CKPTS), default="C")
+    ap.add_argument("--ckpt", choices=sorted(CKPTS), default="C", help="A needs the prismatic-vlms env (see README)")
     ap.add_argument("--out-dir", default="data/acts")
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--layer-stride", type=int, default=2, help="keep every k-th LLM layer (1 = all 32)")
